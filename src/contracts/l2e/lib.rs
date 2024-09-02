@@ -18,12 +18,13 @@ mod l2e_top {
     pub struct L2eTop {
         // spenderid -> <(ownerid, dot balance, token balance)> total balance can be mutli stage claim.
         balances: Mapping<AccountId, Vec<(AccountId, Balance, Balance)>>,
-        // ownerid -> <(spenderid, nft tokenid)>
-        nfts: Mapping<AccountId, Vec<(AccountId, TokenId)>>,
+        // ownerid -> <(spenderid, nft tokenid, claimed true/false)>
+        nfts: Mapping<AccountId, Vec<(AccountId, TokenId, bool)>>,
         erc20_address: Vec<AccountId>,
         erc721_address: Vec<AccountId>,
+        // nft token id num
         token_id_num: u32,
-        self_address: AccountId,
+        admin_address: Vec<AccountId>,
     }
 
     #[ink(event)]
@@ -60,9 +61,10 @@ mod l2e_top {
             erc721_address.push(erc721);
 
             let token_id_num = 10000;
-            // let self_address = AccountId::from([0x42; 32]);
 
             let self_address = Self::env().caller();
+            let mut admin_address: Vec<AccountId> = Vec::new();
+            admin_address.push(self_address);
 
             Self {
                 balances: default_bal_map,
@@ -70,7 +72,7 @@ mod l2e_top {
                 erc20_address,
                 erc721_address,
                 token_id_num,
-                self_address,
+                admin_address,
             }
         }
 
@@ -87,31 +89,22 @@ mod l2e_top {
         }
 
         // AccountId: spender address
-        // bool: if bool is false, then spender already claim nft.
+        // bool: if bool is true, then spender already claim nft.
         #[ink(message)]
-        pub fn get_all_spender_approved_for_owner(&self) -> Option<Vec<(AccountId, bool)>> {
+        pub fn get_all_spender_claimed_for_owner(&self) -> Option<Vec<(AccountId, u32, bool)>> {
             let owner = self.env().caller();
 
             if self.nfts.contains(owner) {
-                let spender_address: Result<
-                    Vec<(ink::primitives::AccountId, TokenId)>,
+                let spender_nftid_claim: Result<
+                    Vec<(ink::primitives::AccountId, TokenId, bool)>,
                     ink::env::Error,
                 > = self
                     .nfts
                     .try_get(owner)
                     .expect("Failed to try get_approved_balances_for_owner");
 
-                if let Ok(vecs) = spender_address {
-                    let mut spender_flag: Vec<(AccountId, bool)> = Vec::new();
-                    for (a, n) in vecs {
-                        if n > 0 {
-                            spender_flag.push((a, true));
-                        } else {
-                            spender_flag.push((a, false));
-                        }
-                    }
-
-                    return Some(spender_flag);
+                if let Ok(vecs) = spender_nftid_claim {
+                    return Some(vecs);
                 }
             }
 
@@ -349,70 +342,88 @@ mod l2e_top {
                 .map_err(|e| format!("approve_nft failed: {:?}", e));
 
             ink::env::debug_println!("approve_nft error:{:?}", approve_nft);
-
+            
+            // store nft tokenid and spender address
             if self.nfts.contains(owner) {
                 let mut nft_tokens = self
                     .nfts
                     .take(owner)
                     .expect("Failed to get (spender, token_id)");
-                nft_tokens.push((spender, token_id));
+                nft_tokens.push((spender, token_id, false));
             } else {
-                let mut spender_token_id = Vec::new();
-                spender_token_id.push((spender, token_id));
+                let mut spender_nftid_claim = Vec::new();
+                spender_nftid_claim.push((spender, token_id, false));
 
-                self.nfts.insert(owner, &spender_token_id);
+                self.nfts.insert(owner, &spender_nftid_claim);
             }
             ink::env::debug_println!("mint_approve_nft--over");
             Ok(())
         }
 
+        // spender claim balances to his account
+        // claim dot 
+        // claim token
         #[ink(message)]
         pub fn transfer_balances_from(
             &mut self,
             owner: AccountId,
-            dot: Balance,
-            token: Balance,
+            dot_value: Balance,
+            token_value: Balance,
             erc20_num: u32,
         ) -> Result<(), Error> {
             let spender = self.env().caller();
 
             // check nft authorization
             if self.nfts.contains(owner) {
-                let spender_value_vec = self
+                let spender_nftid_claim = self
                     .nfts
                     .get(owner)
                     .expect("failed to get nfts spender_value");
 
-                let spender_value = spender_value_vec.iter().find(|&x| x.0 == spender);
+                let spender_value = spender_nftid_claim.iter().find(|&x| x.0 == spender);
 
-                if spender_value.is_none() {
+                if let Some(&(_, _, claimed)) = spender_value {
+                    if !claimed {
+                        return Err(Error::NoClaimedNFT);
+                    }
+                } else {
                     return Err(Error::NoExistNFTApprove);
                 }
+
+                // if spender_value
             } else {
                 return Err(Error::NoExistNFTApprove);
             }
             ink::env::debug_println!("check nft authorization--over");
-            // check dot authorization
+            
             if !self.balances.contains(spender) {
-                return Err(Error::NoExistDOTApprove);
+                // check dot authorization
+                if dot_value > 0 {
+                    return Err(Error::NoExistDOTApprove);
+                }
+                // check dot authorization
+                if token_value > 0 {
+                    return Err(Error::NoExistTokenApprove);
+                }
             } else {
-                let owner_value_vec = self
+                let owner_dot_token = self
                     .balances
                     .get(spender)
                     .expect("failed to get balances owner_value");
 
-                let owner_value = owner_value_vec.iter().find(|&x| x.0 == owner);
+                let owner_value = owner_dot_token.iter().find(|&x| x.0 == owner);
 
                 if owner_value.is_none() {
                     return Err(Error::NoExistDOTApprove);
                 }
 
-                if dot > 0 && owner_value.expect("failed to get value").1 < dot {
-                    return Err(Error::InsufficientApproveTokens);
-                    // transfer dot to spender account
-                } else if self.env().transfer(spender, dot).is_err() {
+                if dot_value > 0 && owner_value.expect("failed to get owner value").1 < dot_value {
+                    return Err(Error::InsufficientApproveDots);
+                    // transfer dot to spender account, gas fee will be deducted from spender account.
+                } else if self.env().transfer(spender, dot_value).is_err() {
                     return Err(Error::TransactionFailed);
                 }
+
                 let mut current_erc20 = self.erc20_address[0];
 
                 if (self.erc20_address.len() as u32)
@@ -421,7 +432,8 @@ mod l2e_top {
                     current_erc20 = self.erc20_address[erc20_num as usize];
                 }
 
-                if token > 0 && owner_value.expect("failed to get value").2 < token {
+                if token_value > 0 && owner_value.expect("failed to get value").2 < token_value {
+                    // if InsufficientApproveTokens is true, frontend should not call erc20 transferFrom function.
                     return Err(Error::InsufficientApproveTokens);
                 }
 
@@ -440,34 +452,38 @@ mod l2e_top {
                 //     .returns::<Vec<u8>>()
                 //     .try_invoke()
                 //     .map_err(|_| Error::TransactionTokenCallFailed)?;
+                
             }
+
             ink::env::debug_println!("check dot authorization--over");
             Self::env().emit_event(Transferred {
                 from: Some(owner),
                 to: Some(spender),
-                dot_amount: dot,
-                token_amount: token,
+                dot_amount: dot_value,
+                token_amount: token_value,
                 nft_id: 0,
             });
 
-            let mut owner_value = self
+            let mut owner_dot_token = self
                 .balances
                 .take(spender)
                 .expect("failed to take owner value");
             // subtract approve value
-            for (k, dot_v, token_v) in owner_value.iter_mut() {
+            for (k, dot_v, token_v) in owner_dot_token.iter_mut() {
                 if k == &owner {
-                    *dot_v = (*dot_v).checked_sub(dot).expect("sub transfer dot failed");
+                    *dot_v = (*dot_v).checked_sub(dot_value).expect("subtract transfer dot failed");
+
                     *token_v = (*token_v)
-                        .checked_sub(token)
-                        .expect("sub transfer token failed");
+                        .checked_sub(token_value)
+                        .expect("subtract transfer token failed");
                     break;
                 }
             }
-            ink::env::debug_println!("transfer_balances_from owner_value::{:?}", owner_value);
+            ink::env::debug_println!("transfer_balances_from over owner_dot_token::{:?}", owner_dot_token);
             Ok(())
         }
 
+        // spender claim nft to his account
         #[ink(message)]
         pub fn transfer_nft_from(
             &mut self,
@@ -476,20 +492,20 @@ mod l2e_top {
         ) -> Result<(), Error> {
             let spender = self.env().caller();
 
-            let spender_token_id_vec = self.nfts.get(owner).expect("failed to get owner_value");
+            let spender_nftid_claim = self.nfts.get(owner).expect("failed to get owner_value");
 
-            let spender_token_id = spender_token_id_vec.iter().find(|&x| x.0 == spender);
+            let spender_value = spender_nftid_claim.iter().find(|&x| x.0 == spender);
 
             if !self.nfts.contains(owner) {
                 return Err(Error::NoExistNFTApprove);
-            } else if spender_token_id.is_none() {
+            } else if spender_value.is_none() {
                 return Err(Error::NoExistNFTApprove);
             }
 
-            let token_id = spender_token_id.expect("failed to get value").1;
+            let token_id = spender_value.expect("failed to get spender value").1;
             ink::env::debug_println!(
                 "transfer_nft_from spender_token_id_vec::{:?}",
-                spender_token_id_vec
+                spender_nftid_claim
             );
             if token_id == 0 {
                 return Err(Error::InsufficientApproveTokens);
@@ -510,7 +526,7 @@ mod l2e_top {
             //     .transferred_value(0)
             //     .exec_input(
             //         ExecutionInput::new(Selector::new(ink::selector_bytes!("transferFrom")))
-            //             .push_arg(owner)
+            //             .push_arg(self.admin_address[0])
             //             .push_arg(spender)
             //             .push_arg(token_id),
             //     )
@@ -529,10 +545,16 @@ mod l2e_top {
                 nft_id: token_id,
             });
 
-            let mut spender_token_id = self.nfts.take(owner).expect("failed to take owner value");
-            // clear to already claim nft
-            spender_token_id.retain(|&x| x.0 == spender && x.1 == token_id);
-            ink::env::debug_println!("transfer_nft_from spender_token_id::{:?}", spender_token_id);
+            let mut spender_nftid_claim = self.nfts.take(owner).expect("failed to take owner value");
+            // Set already claim nft to 0
+            if let Some(index) = spender_nftid_claim.iter().position(|&x| x.0 == spender) {
+                spender_nftid_claim[index].2 = true;
+                ink::env::debug_println!("Element found and modified: {:?}", spender_nftid_claim);
+            } else {
+                ink::env::debug_println!("Element not found");
+            }
+            // spender_nftid_claim.retain(|&x| x.0 == spender && x.1 == token_id);
+            ink::env::debug_println!("transfer_nft_from spender_nftid_claim::{:?}", spender_nftid_claim);
             Ok(())
         }
 
@@ -543,7 +565,7 @@ mod l2e_top {
             erc721_address: AccountId,
         ) -> Result<(), Error> {
             let current_caller = self.env().caller();
-            if current_caller != self.self_address {
+            if !self.admin_address.contains(&current_caller) {
                 return Err(Error::NoAuthorityAddContractAddress);
             }
 
@@ -569,9 +591,12 @@ mod l2e_top {
         TransactionTokenCallFailed,
         TransactionFailed,
         NoExistDOTApprove,
+        NoExistTokenApprove,
         NoExistNFTApprove,
+        InsufficientApproveDots,
         InsufficientApproveTokens,
         NoExistNFT,
+        NoClaimedNFT,
         NoAuthorityAddContractAddress,
     }
 
@@ -589,7 +614,7 @@ mod l2e_top {
             let l2etop = L2eTop::default(AccountId::from([0x0; 32]), AccountId::from([0x0; 32]));
             assert_eq!(l2etop.get_erc20_address(), vec![AccountId::from([0x0; 32])]);
             assert_eq!(l2etop.get_erc20_address(), vec![AccountId::from([0x0; 32])]);
-            assert_eq!(l2etop.get_all_spender_approved_for_owner(), None);
+            assert_eq!(l2etop.get_all_spender_claimed_for_owner(), None);
             assert_eq!(l2etop.get_balances_approved_for_spender(), None);
             assert_eq!(
                 l2etop.get_spender_dot_allowances(AccountId::from([0x0; 32])),
@@ -653,7 +678,7 @@ mod l2e_top {
             let call_builder = contract.call_builder::<L2eTop>();
 
             // Then
-            let get = call_builder.get_all_spender_approved_for_owner();
+            let get = call_builder.get_all_spender_claimed_for_owner();
             let get_result = client.call(&ink_e2e::alice(), &get).dry_run().await?;
             assert!(matches!(get_result.return_value(), None));
 
