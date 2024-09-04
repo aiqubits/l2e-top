@@ -25,6 +25,7 @@ mod l2e_top {
         // nft token id num
         token_id_num: u32,
         admin_address: Vec<AccountId>,
+        auth_token_owner: Vec<AccountId>,
     }
 
     #[ink(event)]
@@ -66,6 +67,9 @@ mod l2e_top {
             let mut admin_address: Vec<AccountId> = Vec::new();
             admin_address.push(self_address);
 
+            let mut auth_token_owner: Vec<AccountId> = Vec::new();
+            auth_token_owner.push(self_address);            
+
             Self {
                 balances: default_bal_map,
                 nfts: default_nft_map,
@@ -73,6 +77,7 @@ mod l2e_top {
                 erc721_address,
                 token_id_num,
                 admin_address,
+                auth_token_owner,
             }
         }
 
@@ -88,12 +93,25 @@ mod l2e_top {
             self.erc721_address.clone()
         }
 
+        #[ink(message)]
+        pub fn get_admin_address(&self) -> Vec<AccountId> {
+            ink::env::debug_println!("erc721_address: {:?}", self.admin_address.clone());
+            self.admin_address.clone()
+        }
+
+        #[ink(message)]
+        pub fn get_auth_token_owner_address(&self) -> Vec<AccountId> {
+            ink::env::debug_println!("erc721_address: {:?}", self.auth_token_owner.clone());
+            self.auth_token_owner.clone()
+        }
+
         // AccountId: spender address
         // bool: if bool is true, then spender already claim nft.
         #[ink(message)]
-        pub fn get_all_spender_claimed_for_owner(&self) -> Option<Vec<(AccountId, u32, bool)>> {
+        pub fn get_all_spender_claimed_for_owner(&self) -> Option<Vec<(AccountId, TokenId, bool)>> {
             let owner = self.env().caller();
-
+            ink::env::debug_println!("get_all_spender_claimed_for_owner self.nfts: {:?}", self.nfts);
+            // let mut claimed_reault: (Vec<(AccountId, TokenId, bool)>, Vec<(AccountId, Balance, Balance)>);
             if self.nfts.contains(owner) {
                 let spender_nftid_claim: Result<
                     Vec<(ink::primitives::AccountId, TokenId, bool)>,
@@ -102,38 +120,62 @@ mod l2e_top {
                     .nfts
                     .try_get(owner)
                     .expect("Failed to try get_approved_balances_for_owner");
-
+                ink::env::debug_println!("spender_nftid_claim: {:?}", spender_nftid_claim);
                 if let Ok(vecs) = spender_nftid_claim {
+                    // claimed_reault.0 = vecs;
                     return Some(vecs);
                 }
             }
-
+            
+            ink::env::debug_println!("get_all_spender_claimed_for_owner over");
             None
         }
 
-        // Not already claim dot and token
+        // AccountId: owner address Vec<(AccountId, Balance, Balance)>
         #[ink(message)]
-        pub fn get_balances_approved_for_spender(&self) -> Option<Vec<(Balance, Balance)>> {
+        pub fn get_all_owner_rewards_for_spender(&self) -> Option<Vec<(AccountId, Balance, Balance)>> {
             let spender = self.env().caller();
-
             if self.balances.contains(spender) {
                 let owner_address: Result<
-                    Vec<(ink::primitives::AccountId, u128, u128)>,
+                    Vec<(ink::primitives::AccountId, Balance, Balance)>,
                     ink::env::Error,
                 > = self
                     .balances
                     .try_get(spender)
-                    .expect("Failed to try get_balances_approved_for_spender");
-                ink::env::debug_println!("owner_address: {:?}", owner_address);
+                    .expect("Failed to try get_all_owner_rewards_for_spender");
                 if let Ok(vecs) = owner_address {
-                    ink::env::debug_println!("vecs: {:?}", vecs);
-                    return Some(vecs.iter().map(|&v| (v.1, v.2)).collect());
+                    return Some(vecs.iter().map(|&v| (v.0, v.1, v.2)).collect());
                 }
-                ink::env::debug_println!("get_balances_approved_for_spender over");
             }
 
+            ink::env::debug_println!("get_all_owner_rewards_for_spender over");
             None
+
         }
+
+        // // Not already claim dot and token
+        // #[ink(message)]
+        // pub fn get_balances_approved_for_spender(&self) -> Option<Vec<(Balance, Balance)>> {
+        //     let spender = self.env().caller();
+
+        //     if self.balances.contains(spender) {
+        //         let owner_address: Result<
+        //             Vec<(ink::primitives::AccountId, u128, u128)>,
+        //             ink::env::Error,
+        //         > = self
+        //             .balances
+        //             .try_get(spender)
+        //             .expect("Failed to try get_balances_approved_for_spender");
+        //         ink::env::debug_println!("owner_address: {:?}", owner_address);
+        //         if let Ok(vecs) = owner_address {
+        //             ink::env::debug_println!("vecs: {:?}", vecs);
+        //             return Some(vecs.iter().map(|&v| (v.1, v.2)).collect());
+        //         }
+        //         ink::env::debug_println!("get_balances_approved_for_spender over");
+        //     }
+
+        //     None
+        // }
 
         #[ink(message)]
         pub fn get_spender_dot_allowances(&self, owner: AccountId) -> Option<Balance> {
@@ -156,7 +198,7 @@ mod l2e_top {
         }
 
         #[ink(message)]
-        pub fn get_spender_token_allowances(&self, owner: AccountId, erc20_num: u32) -> Option<()> {
+        pub fn get_spender_token_allowances(&self, owner: AccountId, erc20_num: u32) -> Option<Balance> {
             let spender = self.env().caller();
 
             let mut current_erc20 = self.erc20_address[0];
@@ -175,17 +217,20 @@ mod l2e_top {
                     .gas_limit(0)
                     .transferred_value(0)
                     .exec_input(
-                        ExecutionInput::new(Selector::new(ink::selector_bytes!("allowances")))
+                        ExecutionInput::new(Selector::new(ink::selector_bytes!("allowance")))
                             .push_arg(owner)
                             .push_arg(spender),
                     )
-                    .returns::<Vec<u8>>()
+                    .returns::<Balance>()
                     .try_invoke()
                     .expect("Failed to get_spender_token_allowances");
+                    // .map_err(|e| format!("Failed to get_spender_token_allowances: {:?}", e));
 
-                // if let Ok(value) = balances {
-                //     return Some(value);
-                // }
+                // ink::env::debug_println!("get_spender_token_allowances balances:{:?}", balances);
+
+                if let Ok(value) = balances {
+                    return Some(value);
+                }
             }
             None
         }
@@ -193,15 +238,16 @@ mod l2e_top {
         #[ink(message)]
         pub fn get_spender_nft_allowances(&self, owner: AccountId) -> Option<TokenId> {
             let spender = self.env().caller();
-
+            ink::env::debug_println!("get_spender_nft_allowances self.nfts: {:?}", self.nfts);
             if self.nfts.contains(owner) {
                 let nfts = self
                     .nfts
                     .try_get(owner)
                     .expect("try get_spender_token_allowances failed");
-
+                ink::env::debug_println!("nfts: {:?}", nfts);
                 if let Ok(vec) = nfts {
                     let value = vec.iter().find(|&v| v.0 == spender);
+                    ink::env::debug_println!("value: {:?}", value);
                     if let Some(v) = value {
                         return Some(v.1);
                     }
@@ -235,9 +281,39 @@ mod l2e_top {
                     > erc20_num.checked_add(1).expect("Failed to add erc20_num")
                 {
                     current_erc20 = self.erc20_address[erc20_num as usize];
+                } else {
+                    // check auth_token_owner role
+                    if !self.auth_token_owner.contains(&owner) {
+                        return Err(Error::NoAuthToApproveL2EToken);
+                    }
                 }
+
                 ink::env::debug_println!("current_erc20:{:?}", current_erc20);
                 ink::env::debug_println!("current_erc20:{:?}", self.erc20_address);
+
+                let result_balance_of = build_call::<DefaultEnvironment>()
+                    // ERC20 address, gas_limit must be some value when in mainnet
+                    .call(current_erc20)
+                    .call_v1()
+                    .gas_limit(0)
+                    .transferred_value(0)
+                    .exec_input(
+                        ExecutionInput::new(Selector::new(ink::selector_bytes!("balanceOf")))
+                            .push_arg(owner),
+                    )
+                    .returns::<Balance>()
+                    .try_invoke()
+                    .expect("Failed to get result_balance_of");
+                    // .map_err(|e| format!("approve_balances failed: {:?}", e));
+
+                ink::env::debug_println!("result_balance_of error:{:?}", result_balance_of);
+
+                if let Ok(balance_of) = result_balance_of {
+                    if token_value > balance_of / 1000 {
+                        return Err(Error::InsufficientOwnerDepositTokens);
+                    }
+                }
+
                 let result_approve = build_call::<DefaultEnvironment>()
                     // ERC20 address, gas_limit must be some value when in mainnet
                     .call(current_erc20)
@@ -249,11 +325,11 @@ mod l2e_top {
                             .push_arg(spender)
                             .push_arg(token_value),
                     )
-                    .returns::<()>()
+                    .returns::<Result<(), Error>>()
                     .try_invoke()
                     .map_err(|e| format!("approve_balances failed: {:?}", e));
 
-                ink::env::debug_println!("result_approve error3:{:?}", result_approve);
+                ink::env::debug_println!("result_approve error:{:?}", result_approve);
             }
             ink::env::debug_println!("token_value  over");
             if self.balances.contains(spender) {
@@ -268,6 +344,7 @@ mod l2e_top {
                 }
 
                 owner_value.push((owner, current_value, token_value));
+                self.balances.insert(spender, &owner_value);
             } else {
                 let mut owner_value = Vec::new();
                 owner_value.push((owner, current_value, token_value));
@@ -291,12 +368,19 @@ mod l2e_top {
                 .token_id_num
                 .checked_add(1)
                 .expect("Failed to create token_id");
-            let mut token_id: TokenId = self.token_id_num;
+            let token_id: TokenId = self.token_id_num;
 
             let mut current_erc721 = self.erc721_address[0];
-            if (self.erc721_address.len() as u32) > erc721_num {
+            if (self.erc721_address.len() as u32) > erc721_num.checked_add(1).expect("Failed to add erc721_num") {
                 current_erc721 = self.erc721_address[erc721_num as usize];
+            } else {
+                // check auth_token_owner role
+                if !self.auth_token_owner.contains(&owner) {
+                    return Err(Error::NoAuthToMintL2ENFT);
+                }
             }
+
+
             ink::env::debug_println!("current_erc721:{:?}", current_erc721);
             ink::env::debug_println!("token_id:{:?}", token_id);
             // call ERC721 mint function
@@ -310,7 +394,7 @@ mod l2e_top {
                     ExecutionInput::new(Selector::new(ink::selector_bytes!("mint")))
                         .push_arg(token_id),
                 )
-                .returns::<()>()
+                .returns::<Result<(), Error>>()
                 .try_invoke()
                 // .map_err(|_| Error::FailedMintNFT)?;
                 .map_err(|e| format!("mint_approve_nft failed: {:?}", e));
@@ -336,9 +420,8 @@ mod l2e_top {
                         .push_arg(spender)
                         .push_arg(token_id),
                 )
-                .returns::<()>()
+                .returns::<Result<(), Error>>()
                 .try_invoke()
-                // .map_err(|_| Error::ApproveNFTFailed)?;
                 .map_err(|e| format!("approve_nft failed: {:?}", e));
 
             ink::env::debug_println!("approve_nft error:{:?}", approve_nft);
@@ -350,6 +433,7 @@ mod l2e_top {
                     .take(owner)
                     .expect("Failed to get (spender, token_id)");
                 nft_tokens.push((spender, token_id, false));
+                self.nfts.insert(owner, &nft_tokens);
             } else {
                 let mut spender_nftid_claim = Vec::new();
                 spender_nftid_claim.push((spender, token_id, false));
@@ -362,7 +446,7 @@ mod l2e_top {
 
         // spender claim balances to his account
         // claim dot 
-        // claim token
+        // claim token, frontend should be transfer 0.000000000001 Unit represent 1 Token.
         #[ink(message)]
         pub fn transfer_balances_from(
             &mut self,
@@ -379,9 +463,9 @@ mod l2e_top {
                     .nfts
                     .get(owner)
                     .expect("failed to get nfts spender_value");
-
+                ink::env::debug_println!("transfer_balances_from: {:?}", spender_nftid_claim);
                 let spender_value = spender_nftid_claim.iter().find(|&x| x.0 == spender);
-
+                ink::env::debug_println!("spender_value: {:?}", spender_value);
                 if let Some(&(_, _, claimed)) = spender_value {
                     if !claimed {
                         return Err(Error::NoClaimedNFT);
@@ -389,9 +473,8 @@ mod l2e_top {
                 } else {
                     return Err(Error::NoExistNFTApprove);
                 }
-
-                // if spender_value
             } else {
+                ink::env::debug_println!("nfts not contains owner");
                 return Err(Error::NoExistNFTApprove);
             }
             ink::env::debug_println!("check nft authorization--over");
@@ -416,7 +499,9 @@ mod l2e_top {
                 if owner_value.is_none() {
                     return Err(Error::NoExistDOTApprove);
                 }
-
+                ink::env::debug_println!("owner_value: {:?}", owner_value);
+                ink::env::debug_println!("owner_value 1: {:?}", owner_value.expect("failed to get owner value").1);
+                ink::env::debug_println!("owner_value 2: {:?}", owner_value.expect("failed to get owner value").2);
                 if dot_value > 0 && owner_value.expect("failed to get owner value").1 < dot_value {
                     return Err(Error::InsufficientApproveDots);
                     // transfer dot to spender account, gas fee will be deducted from spender account.
@@ -431,7 +516,7 @@ mod l2e_top {
                 {
                     current_erc20 = self.erc20_address[erc20_num as usize];
                 }
-
+                ink::env::debug_println!("dot_value:{}---token_value:{}", dot_value, token_value);
                 if token_value > 0 && owner_value.expect("failed to get value").2 < token_value {
                     // if InsufficientApproveTokens is true, frontend should not call erc20 transferFrom function.
                     return Err(Error::InsufficientApproveTokens);
@@ -479,6 +564,7 @@ mod l2e_top {
                     break;
                 }
             }
+            self.balances.insert(spender, &owner_dot_token);
             ink::env::debug_println!("transfer_balances_from over owner_dot_token::{:?}", owner_dot_token);
             Ok(())
         }
@@ -492,13 +578,15 @@ mod l2e_top {
         ) -> Result<(), Error> {
             let spender = self.env().caller();
 
-            let spender_nftid_claim = self.nfts.get(owner).expect("failed to get owner_value");
-
-            let spender_value = spender_nftid_claim.iter().find(|&x| x.0 == spender);
-
             if !self.nfts.contains(owner) {
                 return Err(Error::NoExistNFTApprove);
-            } else if spender_value.is_none() {
+            } 
+            
+            let spender_nftid_claim = self.nfts.get(owner).expect("failed to get owner_value");
+
+            let spender_value = spender_nftid_claim.iter().find(|&x| x.0 == spender);            
+            
+            if spender_value.is_none() {
                 return Err(Error::NoExistNFTApprove);
             }
 
@@ -546,15 +634,33 @@ mod l2e_top {
             });
 
             let mut spender_nftid_claim = self.nfts.take(owner).expect("failed to take owner value");
-            // Set already claim nft to 0
+            // Set already claim nft to true
             if let Some(index) = spender_nftid_claim.iter().position(|&x| x.0 == spender) {
                 spender_nftid_claim[index].2 = true;
+                self.nfts.insert(owner, &spender_nftid_claim);
                 ink::env::debug_println!("Element found and modified: {:?}", spender_nftid_claim);
             } else {
                 ink::env::debug_println!("Element not found");
             }
             // spender_nftid_claim.retain(|&x| x.0 == spender && x.1 == token_id);
             ink::env::debug_println!("transfer_nft_from spender_nftid_claim::{:?}", spender_nftid_claim);
+            ink::env::debug_println!("transfer_nft_from self.nfts:{:?}", self.nfts);
+            if self.nfts.contains(owner) {
+                let spender_nftid_claim: Result<
+                    Vec<(ink::primitives::AccountId, TokenId, bool)>,
+                    ink::env::Error,
+                > = self
+                    .nfts
+                    .try_get(owner)
+                    .expect("Failed to try get_approved_balances_for_owner");
+                ink::env::debug_println!("spender_nftid_claim: {:?}", spender_nftid_claim);
+                if let Ok(vecs) = spender_nftid_claim {
+                    // return Some(vecs);
+                    ink::env::debug_println!("transfer_nft_from vecs:{:?}", vecs);
+                }
+            }
+            ink::env::debug_println!("transfer_nft_from over");
+
             Ok(())
         }
 
@@ -563,41 +669,69 @@ mod l2e_top {
             &mut self,
             erc20_address: AccountId,
             erc721_address: AccountId,
-        ) -> Result<(), Error> {
+        ) -> Result<bool, Error> {
             let current_caller = self.env().caller();
             if !self.admin_address.contains(&current_caller) {
                 return Err(Error::NoAuthorityAddContractAddress);
             }
 
             // add erc20 contract address
-            let mut erc20_address_vec = self.erc20_address.clone();
+            let erc20_address_vec = &mut self.erc20_address;
+            if erc20_address_vec.contains(&erc20_address) { 
+                return Err(Error::AlreadyExistTokenAddress);
+            }
             erc20_address_vec.push(erc20_address);
 
             // add erc721 contract address
-            let mut erc721_address_vec = self.erc721_address.clone();
+            let erc721_address_vec = &mut self.erc721_address;
+            if erc721_address_vec.contains(&erc721_address) { 
+                return Err(Error::AlreadyExistNFTAddress);
+            }
             erc721_address_vec.push(erc721_address);
-            Ok(())
+            Ok(true)
         }
+        #[ink(message)]
+        pub fn add_auth_token_owner(
+            &mut self,
+            owner_address: AccountId,
+        ) -> Result<bool, Error> {
+            let current_caller = self.env().caller();
+            if !self.auth_token_owner.contains(&current_caller) {
+                return Err(Error::NoAuthorityAddAuthTokenOwner);
+            }
+            
+            // add auth_token_owner address
+            let auth_owner_address_vec = &mut self.auth_token_owner;
+            if auth_owner_address_vec.contains(&owner_address) { 
+                return Err(Error::AlreadyExistAuthAddress);
+            }
+            auth_owner_address_vec.push(owner_address);
+
+            Ok(true)
+        }
+        
     }
 
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     pub enum Error {
-        ApproveDotsFailed,
         BalancesAlreadyApproved,
-        FailedMintNFT,
-        ApproveNFTFailed,
-        TransactionNFTCallFailed,
-        TransactionTokenCallFailed,
+        NoAuthToMintL2ENFT,
+        NoAuthToApproveL2EToken,
         TransactionFailed,
         NoExistDOTApprove,
         NoExistTokenApprove,
         NoExistNFTApprove,
         InsufficientApproveDots,
         InsufficientApproveTokens,
+        InsufficientOwnerDepositTokens,
         NoExistNFT,
         NoClaimedNFT,
         NoAuthorityAddContractAddress,
+        NoAuthorityAddAuthTokenOwner,
+        AlreadyExistTokenAddress,
+        AlreadyExistNFTAddress,
+        AlreadyExistAuthAddress,
     }
 
     /// Unit tests in Rust are normally defined within such a `#[cfg(test)]`
@@ -615,7 +749,7 @@ mod l2e_top {
             assert_eq!(l2etop.get_erc20_address(), vec![AccountId::from([0x0; 32])]);
             assert_eq!(l2etop.get_erc20_address(), vec![AccountId::from([0x0; 32])]);
             assert_eq!(l2etop.get_all_spender_claimed_for_owner(), None);
-            assert_eq!(l2etop.get_balances_approved_for_spender(), None);
+            assert_eq!(l2etop.get_all_owner_rewards_for_spender(), None);
             assert_eq!(
                 l2etop.get_spender_dot_allowances(AccountId::from([0x0; 32])),
                 None
@@ -683,7 +817,7 @@ mod l2e_top {
             assert!(matches!(get_result.return_value(), None));
 
             // Then
-            let get = call_builder.get_balances_approved_for_spender();
+            let get = call_builder.get_all_owner_rewards_for_spender();
             let get_result = client.call(&ink_e2e::alice(), &get).dry_run().await?;
             assert!(matches!(get_result.return_value(), None));
 
